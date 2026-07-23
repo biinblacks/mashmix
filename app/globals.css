@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+@theme inline {
+  --font-display: "Space Grotesk", "Arial Narrow", sans-serif;
+  --font-body: "Inter", ui-sans-serif, system-ui, sans-serif;
+
+  --color-ink: #0b0a10;
+  --color-paper: #f2f0ea;
+  --color-magenta: #b8398a;
+  --color-violet: #6e56cf;
+  --color-amber: #e8b339;
+  --color-line: #26232f;
+}
+
+body {
+  font-family: var(--font-body);
+}
+
+.font-display {
+  font-family: var(--font-display);
+}
