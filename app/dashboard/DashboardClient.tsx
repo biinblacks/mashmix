@@ -4,10 +4,12 @@ import { useState, useCallback, useRef } from "react";
 import { Upload, Music, Loader2, Sparkles, Crown } from "lucide-react";
 import CamelotWheel from "@/components/CamelotWheel";
 import { createClient } from "@/lib/supabase/client";
+import { analyzeAudioFile, sanitizeStorageName } from "@/lib/audio/analyze";
 
 interface Track {
   id: string;
   file_name: string;
+  storage_path: string;
   bpm: number | null;
   musical_key: string | null;
   analysis_status: string;
@@ -93,8 +95,11 @@ export default function DashboardClient({
 
       // Upload directly browser -> Supabase Storage (bypasses Vercel's 4.5MB function payload limit entirely)
       const newTracks: Track[] = [];
+      const fileByTrackId = new Map<string, File>();
       for (const file of validFiles) {
-        const storagePath = `${user.id}/${Date.now()}-${file.name}`;
+        // Storage keys must be plain ASCII, so strip Vietnamese diacritics and
+        // other unsupported characters. The original name is kept in the DB.
+        const storagePath = `${user.id}/${Date.now()}-${sanitizeStorageName(file.name)}`;
 
         const { error: uploadError } = await supabase.storage
           .from("tracks")
@@ -120,7 +125,10 @@ export default function DashboardClient({
           setErrorMsg(`Saving ${file.name} failed: ${insertError.message}`);
           continue;
         }
-        if (trackRow) newTracks.push(trackRow);
+        if (trackRow) {
+          newTracks.push(trackRow);
+          fileByTrackId.set(trackRow.id, file);
+        }
       }
 
       if (!isPro && newTracks.length > 0) {
@@ -133,18 +141,33 @@ export default function DashboardClient({
       setTracks((prev) => [...newTracks, ...prev]);
       setUploading(false);
 
-      // Kick off analysis for each uploaded track (server-side, file bytes fetched
-      // from Storage there, not from the client request, so no size limit issue)
+      // Analyze in the browser (Web Audio API) — no external service required.
+      // Sequential so a large library doesn't freeze the tab.
       setAnalyzing(true);
-      await Promise.all(
-        newTracks.map((t) =>
-          fetch("/api/analyze", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ trackId: t.id }),
-          }).catch(() => null)
-        )
-      );
+      for (const track of newTracks) {
+        const file = fileByTrackId.get(track.id);
+        if (!file) continue;
+
+        try {
+          const result = await analyzeAudioFile(file);
+          await supabase
+            .from("tracks")
+            .update({
+              bpm: result.bpm,
+              musical_key: result.camelotKey,
+              key_confidence: result.keyConfidence,
+              energy: result.energy,
+              duration_seconds: result.durationSeconds,
+              analysis_status: "done",
+            })
+            .eq("id", track.id);
+        } catch {
+          await supabase
+            .from("tracks")
+            .update({ analysis_status: "failed" })
+            .eq("id", track.id);
+        }
+      }
 
       const { data: refreshedTracks } = await supabase
         .from("tracks")
@@ -160,6 +183,51 @@ export default function DashboardClient({
       setAnalyzing(false);
     }
   }, [supabase]);
+
+  const handleReanalyze = useCallback(async () => {
+    setAnalyzing(true);
+    setErrorMsg(null);
+
+    const pending = tracks.filter((t) => t.analysis_status !== "done" || !t.bpm);
+
+    for (const track of pending) {
+      try {
+        const { data: blob, error: downloadError } = await supabase.storage
+          .from("tracks")
+          .download(track.storage_path);
+
+        if (downloadError || !blob) {
+          await supabase.from("tracks").update({ analysis_status: "failed" }).eq("id", track.id);
+          continue;
+        }
+
+        const file = new File([blob], track.file_name, { type: blob.type || "audio/mpeg" });
+        const result = await analyzeAudioFile(file);
+
+        await supabase
+          .from("tracks")
+          .update({
+            bpm: result.bpm,
+            musical_key: result.camelotKey,
+            key_confidence: result.keyConfidence,
+            energy: result.energy,
+            duration_seconds: result.durationSeconds,
+            analysis_status: "done",
+          })
+          .eq("id", track.id);
+      } catch {
+        await supabase.from("tracks").update({ analysis_status: "failed" }).eq("id", track.id);
+      }
+    }
+
+    const { data: refreshed } = await supabase
+      .from("tracks")
+      .select("*")
+      .order("created_at", { ascending: false });
+    if (refreshed) setTracks(refreshed);
+
+    setAnalyzing(false);
+  }, [supabase, tracks]);
 
   const handleFindMatches = useCallback(async () => {
     setMatching(true);
@@ -318,11 +386,21 @@ export default function DashboardClient({
               ))}
             </div>
 
+            {tracks.some((t) => t.analysis_status !== "done" || !t.bpm) && (
+              <button
+                onClick={handleReanalyze}
+                disabled={analyzing}
+                className="mt-5 mr-3 inline-flex items-center gap-2 rounded-full bg-white/[0.06] px-5 py-2.5 font-display text-sm font-semibold text-[var(--color-paper)] disabled:opacity-50"
+              >
+                {analyzing ? "Analyzing…" : "Analyze tracks"}
+              </button>
+            )}
+
             {analyzedTracks.length >= 2 && (
               <button
                 onClick={handleFindMatches}
                 disabled={matching}
-                className="mt-5 flex items-center gap-2 rounded-full bg-gradient-to-r from-[var(--color-magenta)] to-[var(--color-violet)] px-5 py-2.5 font-display text-sm font-semibold text-[var(--color-paper)] disabled:opacity-50"
+                className="mt-5 inline-flex items-center gap-2 rounded-full bg-gradient-to-r from-[var(--color-magenta)] to-[var(--color-violet)] px-5 py-2.5 font-display text-sm font-semibold text-[var(--color-paper)] disabled:opacity-50"
               >
                 <Sparkles size={16} />
                 {matching ? "Finding matches…" : "Find mashup matches"}
