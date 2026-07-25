@@ -100,7 +100,10 @@ export default function DashboardClient({
           .from("tracks")
           .upload(storagePath, file, { contentType: file.type });
 
-        if (uploadError) continue;
+        if (uploadError) {
+          setErrorMsg(`Storage upload failed for ${file.name}: ${uploadError.message}`);
+          continue;
+        }
 
         const { data: trackRow, error: insertError } = await supabase
           .from("tracks")
@@ -113,7 +116,11 @@ export default function DashboardClient({
           .select()
           .single();
 
-        if (!insertError && trackRow) newTracks.push(trackRow);
+        if (insertError) {
+          setErrorMsg(`Saving ${file.name} failed: ${insertError.message}`);
+          continue;
+        }
+        if (trackRow) newTracks.push(trackRow);
       }
 
       if (!isPro && newTracks.length > 0) {
@@ -146,8 +153,9 @@ export default function DashboardClient({
 
       if (refreshedTracks) setTracks(refreshedTracks);
       setAnalyzing(false);
-    } catch {
-      setErrorMsg("Upload failed. Check your connection and try again.");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setErrorMsg(`Upload failed: ${detail}`);
       setUploading(false);
       setAnalyzing(false);
     }
