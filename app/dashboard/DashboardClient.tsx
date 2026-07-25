@@ -59,24 +59,75 @@ export default function DashboardClient({
     setUploading(true);
     setErrorMsg(null);
 
-    const formData = new FormData();
-    Array.from(files).forEach((file) => formData.append("files", file));
+    const ALLOWED_TYPES = ["audio/mpeg", "audio/wav", "audio/x-wav", "audio/mp3", "audio/mp4", "audio/x-m4a"];
+    const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB per file (Supabase Storage limit, not Vercel's)
 
     try {
-      const res = await fetch("/api/upload", { method: "POST", body: formData });
-      const data = await res.json();
-
-      if (!res.ok) {
-        setErrorMsg(data.error ?? "Upload failed");
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
+      if (!user) {
+        setErrorMsg("Please log in again.");
         setUploading(false);
         return;
       }
 
-      const newTracks: Track[] = data.tracks;
+      // Check usage limit client-side (reads own profile row, allowed by RLS)
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("subscription_status, usage_count_this_month")
+        .eq("id", user.id)
+        .single();
+
+      const isPro = profile?.subscription_status === "active";
+      const freeLimit = 3;
+      const validFiles = Array.from(files).filter(
+        (f) => ALLOWED_TYPES.includes(f.type) && f.size <= MAX_FILE_SIZE
+      );
+
+      if (!isPro && (profile?.usage_count_this_month ?? 0) + validFiles.length > freeLimit) {
+        setErrorMsg(`Free plan allows ${freeLimit} uploads/month. Upgrade to MashMix Pro for unlimited.`);
+        setUploading(false);
+        return;
+      }
+
+      // Upload directly browser -> Supabase Storage (bypasses Vercel's 4.5MB function payload limit entirely)
+      const newTracks: Track[] = [];
+      for (const file of validFiles) {
+        const storagePath = `${user.id}/${Date.now()}-${file.name}`;
+
+        const { error: uploadError } = await supabase.storage
+          .from("tracks")
+          .upload(storagePath, file, { contentType: file.type });
+
+        if (uploadError) continue;
+
+        const { data: trackRow, error: insertError } = await supabase
+          .from("tracks")
+          .insert({
+            user_id: user.id,
+            file_name: file.name,
+            storage_path: storagePath,
+            analysis_status: "pending",
+          })
+          .select()
+          .single();
+
+        if (!insertError && trackRow) newTracks.push(trackRow);
+      }
+
+      if (!isPro && newTracks.length > 0) {
+        await supabase
+          .from("profiles")
+          .update({ usage_count_this_month: (profile?.usage_count_this_month ?? 0) + newTracks.length })
+          .eq("id", user.id);
+      }
+
       setTracks((prev) => [...newTracks, ...prev]);
       setUploading(false);
 
-      // Kick off analysis for each uploaded track
+      // Kick off analysis for each uploaded track (server-side, file bytes fetched
+      // from Storage there, not from the client request, so no size limit issue)
       setAnalyzing(true);
       await Promise.all(
         newTracks.map((t) =>
@@ -88,7 +139,6 @@ export default function DashboardClient({
         )
       );
 
-      // Refresh track list from DB to get analysis results
       const { data: refreshedTracks } = await supabase
         .from("tracks")
         .select("*")
