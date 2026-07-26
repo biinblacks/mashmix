@@ -1,6 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createAdminClient } from "@/lib/supabase/server";
-import { uploadTrack, startSplit, waitForSplit } from "@/lib/lalal/client";
+import { uploadTrack, startSplit } from "@/lib/lalal/client";
+
+// Uploading two ~15MB files to LALAL takes a while; ask Vercel for headroom.
+export const maxDuration = 300;
 
 export async function POST(request: NextRequest) {
   const supabase = await createClient();
@@ -10,6 +13,13 @@ export async function POST(request: NextRequest) {
 
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
+
+  if (!process.env.LALAL_API_KEY) {
+    return NextResponse.json(
+      { error: "LALAL_API_KEY is not configured on the server" },
+      { status: 500 }
+    );
   }
 
   const { trackAId, trackBId } = await request.json();
@@ -45,14 +55,17 @@ export async function POST(request: NextRequest) {
   const trackA = tracks.find((t) => t.id === trackAId)!;
   const trackB = tracks.find((t) => t.id === trackBId)!;
 
-  const { data: mashupRow } = await admin
+  const { data: mashupRow, error: mashupError } = await admin
     .from("mashups")
     .insert({ user_id: user.id, track_a_id: trackAId, track_b_id: trackBId, status: "processing" })
     .select()
     .single();
 
+  if (mashupError || !mashupRow) {
+    return NextResponse.json({ error: "Could not create mashup job" }, { status: 500 });
+  }
+
   try {
-    // Download both tracks from storage
     const [fileAData, fileBData] = await Promise.all([
       admin.storage.from("tracks").download(trackA.storage_path),
       admin.storage.from("tracks").download(trackB.storage_path),
@@ -65,47 +78,26 @@ export async function POST(request: NextRequest) {
     const bufferA = Buffer.from(await fileAData.data.arrayBuffer());
     const bufferB = Buffer.from(await fileBData.data.arrayBuffer());
 
-    // Track A: extract instrumental (backing track)
-    // Track B: extract vocals (to lay over track A's instrumental)
     const [fileIdA, fileIdB] = await Promise.all([
       uploadTrack(bufferA, trackA.file_name),
       uploadTrack(bufferB, trackB.file_name),
     ]);
 
-    await Promise.all([
-      startSplit(fileIdA, "vocals"), // we'll use back_track (instrumental) from this
-      startSplit(fileIdB, "vocals"), // we'll use stem_track (vocals) from this
-    ]);
+    // Track A supplies the instrumental, track B supplies the vocals
+    await Promise.all([startSplit(fileIdA, "vocals"), startSplit(fileIdB, "vocals")]);
 
-    const [resultA, resultB] = await Promise.all([
-      waitForSplit(fileIdA),
-      waitForSplit(fileIdB),
-    ]);
-
-    // Store the two resulting stem URLs — actual audio mixing (combining
-    // instrumental + vocals into one file) happens client-side or in a
-    // follow-up render step, since that's simple ffmpeg work, not AI.
     await admin
       .from("mashups")
-      .update({
-        status: "done",
-        lalal_task_id: `${fileIdA}:${fileIdB}`,
-        result_storage_path: JSON.stringify({
-          instrumental: resultA.backTrackUrl,
-          vocals: resultB.stemUrl,
-        }),
-      })
+      .update({ lalal_task_id: `${fileIdA}:${fileIdB}` })
       .eq("id", mashupRow.id);
 
-    return NextResponse.json({
-      success: true,
-      mashupId: mashupRow.id,
-      instrumentalUrl: resultA.backTrackUrl,
-      vocalsUrl: resultB.stemUrl,
-    });
+    return NextResponse.json({ success: true, mashupId: mashupRow.id });
   } catch (err) {
-    await admin.from("mashups").update({ status: "failed" }).eq("id", mashupRow.id);
-    const message = err instanceof Error ? err.message : "Mashup generation failed";
+    const message = err instanceof Error ? err.message : "Mashup start failed";
+    await admin
+      .from("mashups")
+      .update({ status: "failed", result_storage_path: message })
+      .eq("id", mashupRow.id);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }

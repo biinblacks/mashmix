@@ -53,6 +53,7 @@ export default function DashboardClient({
   const [analyzeProgress, setAnalyzeProgress] = useState<string | null>(null);
   const [matching, setMatching] = useState(false);
   const [generatingMashup, setGeneratingMashup] = useState<string | null>(null);
+  const [mashupProgress, setMashupProgress] = useState<string | null>(null);
   const [mashupResult, setMashupResult] = useState<{ instrumentalUrl: string; vocalsUrl: string } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -252,31 +253,82 @@ export default function DashboardClient({
   }, []);
 
   const handleGenerateMashup = useCallback(async (trackAId: string, trackBId: string) => {
-    setGeneratingMashup(`${trackAId}-${trackBId}`);
+    const jobKey = `${trackAId}-${trackBId}`;
+    setGeneratingMashup(jobKey);
     setErrorMsg(null);
     setMashupResult(null);
+    setMashupProgress("Uploading tracks to the separation service…");
 
     try {
-      const res = await fetch("/api/mashup", {
+      const res = await fetch("/api/mashup/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ trackAId, trackBId }),
       });
-      const data = await res.json();
 
-      if (!res.ok) {
-        if (data.code === "UPGRADE_REQUIRED") {
-          setErrorMsg("Generating mashups requires MashMix Pro. Upgrade to continue.");
-        } else {
-          setErrorMsg(data.error ?? "Mashup generation failed");
-        }
-      } else {
-        setMashupResult({ instrumentalUrl: data.instrumentalUrl, vocalsUrl: data.vocalsUrl });
+      const text = await res.text();
+      let data: { mashupId?: string; error?: string; code?: string };
+      try {
+        data = JSON.parse(text);
+      } catch {
+        throw new Error(`Server returned an unexpected response (${res.status})`);
       }
-    } catch {
-      setErrorMsg("Mashup generation failed. Try again.");
+
+      if (!res.ok || !data.mashupId) {
+        if (data.code === "UPGRADE_REQUIRED") {
+          throw new Error("Generating mashups requires MashMix Pro.");
+        }
+        throw new Error(data.error ?? `Request failed (${res.status})`);
+      }
+
+      // Separation runs on LALAL's side; poll until it finishes rather than
+      // holding a serverless request open past its time limit.
+      setMashupProgress("Separating vocals and instrumental…");
+      const startedAt = Date.now();
+      const timeoutMs = 10 * 60 * 1000;
+
+      while (Date.now() - startedAt < timeoutMs) {
+        await new Promise((r) => setTimeout(r, 5000));
+
+        const statusRes = await fetch(`/api/mashup/status?mashupId=${data.mashupId}`);
+        const statusText = await statusRes.text();
+        let statusData: {
+          status?: string;
+          error?: string;
+          instrumentalUrl?: string;
+          vocalsUrl?: string;
+        };
+        try {
+          statusData = JSON.parse(statusText);
+        } catch {
+          continue; // transient non-JSON response, keep polling
+        }
+
+        if (statusData.status === "done" && statusData.instrumentalUrl && statusData.vocalsUrl) {
+          setMashupResult({
+            instrumentalUrl: statusData.instrumentalUrl,
+            vocalsUrl: statusData.vocalsUrl,
+          });
+          setMashupProgress(null);
+          setGeneratingMashup(null);
+          return;
+        }
+
+        if (statusData.status === "failed") {
+          throw new Error(statusData.error ?? "Separation failed");
+        }
+
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        setMashupProgress(`Separating vocals and instrumental… (${elapsed}s)`);
+      }
+
+      throw new Error("Timed out waiting for separation to finish");
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err);
+      setErrorMsg(`Mashup failed: ${detail}`);
+      setMashupProgress(null);
+      setGeneratingMashup(null);
     }
-    setGeneratingMashup(null);
   }, []);
 
   const handleUpgrade = useCallback(async () => {
@@ -456,7 +508,9 @@ export default function DashboardClient({
                           disabled={generatingMashup === key}
                           className="mt-3 w-full rounded-full bg-white/[0.06] py-2 text-xs font-medium text-[var(--color-paper)] disabled:opacity-50"
                         >
-                          {generatingMashup === key ? "Generating mashup…" : "Generate mashup"}
+                          {generatingMashup === key
+                            ? mashupProgress ?? "Generating mashup…"
+                            : "Generate mashup"}
                         </button>
                       </div>
                     );
