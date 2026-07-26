@@ -241,22 +241,30 @@ export function detectKey(samples: Float32Array, sampleRate: number): {
 /** Decode an audio file and extract tempo, key, and loudness. */
 export async function analyzeAudioFile(file: File): Promise<AudioAnalysis> {
   const arrayBuffer = await file.arrayBuffer();
+  const targetRate = 11025;
 
-  const AudioCtx =
-    window.AudioContext ||
-    (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
-  const ctx = new AudioCtx();
-
+  // Decode straight into a low-rate context: the browser resamples during
+  // decoding, so a 15MB MP3 never expands to a full-rate PCM buffer in memory.
   let decoded: AudioBuffer;
   try {
-    decoded = await ctx.decodeAudioData(arrayBuffer);
-  } finally {
-    void ctx.close();
+    const offline = new OfflineAudioContext(1, 1, targetRate);
+    decoded = await offline.decodeAudioData(arrayBuffer.slice(0));
+  } catch {
+    const AudioCtx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+    const ctx = new AudioCtx();
+    try {
+      decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+    } finally {
+      void ctx.close();
+    }
   }
 
   const durationSeconds = decoded.duration;
+  const sourceRate = decoded.sampleRate;
 
-  // Mix to mono
+  // Mix down to mono
   const channelCount = decoded.numberOfChannels;
   const length = decoded.length;
   const mono = new Float32Array(length);
@@ -265,24 +273,29 @@ export async function analyzeAudioFile(file: File): Promise<AudioAnalysis> {
     for (let i = 0; i < length; i++) mono[i] += data[i] / channelCount;
   }
 
-  // Downsample to ~11025 Hz to keep the FFT and autocorrelation cheap
-  const targetRate = 11025;
-  const ratio = decoded.sampleRate / targetRate;
-  const downLength = Math.floor(length / ratio);
-  const down = new Float32Array(downLength);
-  for (let i = 0; i < downLength; i++) down[i] = mono[Math.floor(i * ratio)];
+  // If the browser ignored the context rate, downsample manually
+  let samples = mono;
+  let rate = sourceRate;
+  if (sourceRate > targetRate * 1.5) {
+    const ratio = sourceRate / targetRate;
+    const downLength = Math.floor(length / ratio);
+    const down = new Float32Array(downLength);
+    for (let i = 0; i < downLength; i++) down[i] = mono[Math.floor(i * ratio)];
+    samples = down;
+    rate = targetRate;
+  }
 
   // Tempo from the first 60s, key from the first 120s (accuracy/speed tradeoff)
-  const bpmSlice = down.subarray(0, Math.min(down.length, targetRate * 60));
-  const keySlice = down.subarray(0, Math.min(down.length, targetRate * 120));
+  const bpmSlice = samples.subarray(0, Math.min(samples.length, rate * 60));
+  const keySlice = samples.subarray(0, Math.min(samples.length, rate * 120));
 
-  const bpm = detectBpm(bpmSlice, targetRate);
-  const key = detectKey(keySlice, targetRate);
+  const bpm = detectBpm(bpmSlice, rate);
+  const key = detectKey(keySlice, rate);
 
   // Rough 0-1 loudness score
   let sumSquares = 0;
-  for (let i = 0; i < down.length; i++) sumSquares += down[i] * down[i];
-  const rms = Math.sqrt(sumSquares / down.length);
+  for (let i = 0; i < samples.length; i++) sumSquares += samples[i] * samples[i];
+  const rms = Math.sqrt(sumSquares / samples.length);
   const energy = Math.round(Math.min(1, rms / 0.3) * 1000) / 1000;
 
   return {

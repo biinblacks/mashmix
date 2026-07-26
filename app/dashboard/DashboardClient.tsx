@@ -50,6 +50,7 @@ export default function DashboardClient({
   const [matches, setMatches] = useState<MatchResult[]>([]);
   const [uploading, setUploading] = useState(false);
   const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeProgress, setAnalyzeProgress] = useState<string | null>(null);
   const [matching, setMatching] = useState(false);
   const [generatingMashup, setGeneratingMashup] = useState<string | null>(null);
   const [mashupResult, setMashupResult] = useState<{ instrumentalUrl: string; vocalsUrl: string } | null>(null);
@@ -190,7 +191,10 @@ export default function DashboardClient({
 
     const pending = tracks.filter((t) => t.analysis_status !== "done" || !t.bpm);
 
+    let index = 0;
     for (const track of pending) {
+      index++;
+      setAnalyzeProgress(`${index}/${pending.length} — ${track.file_name}`);
       try {
         const { data: blob, error: downloadError } = await supabase.storage
           .from("tracks")
@@ -226,6 +230,7 @@ export default function DashboardClient({
       .order("created_at", { ascending: false });
     if (refreshed) setTracks(refreshed);
 
+    setAnalyzeProgress(null);
     setAnalyzing(false);
   }, [supabase, tracks]);
 
@@ -387,13 +392,18 @@ export default function DashboardClient({
             </div>
 
             {tracks.some((t) => t.analysis_status !== "done" || !t.bpm) && (
-              <button
-                onClick={handleReanalyze}
-                disabled={analyzing}
-                className="mt-5 mr-3 inline-flex items-center gap-2 rounded-full bg-white/[0.06] px-5 py-2.5 font-display text-sm font-semibold text-[var(--color-paper)] disabled:opacity-50"
-              >
-                {analyzing ? "Analyzing…" : "Analyze tracks"}
-              </button>
+              <div className="mt-5 flex flex-wrap items-center gap-3">
+                <button
+                  onClick={handleReanalyze}
+                  disabled={analyzing}
+                  className="inline-flex items-center gap-2 rounded-full bg-white/[0.06] px-5 py-2.5 font-display text-sm font-semibold text-[var(--color-paper)] disabled:opacity-50"
+                >
+                  {analyzing ? "Analyzing…" : "Analyze tracks"}
+                </button>
+                {analyzeProgress && (
+                  <span className="text-xs text-[var(--color-paper)]/50">{analyzeProgress}</span>
+                )}
+              </div>
             )}
 
             {analyzedTracks.length >= 2 && (
