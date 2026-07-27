@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createClient, createAdminClient } from "@/lib/supabase/server";
-import { checkSplitStatus } from "@/lib/lalal/client";
+import { checkSplitStatuses } from "@/lib/lalal/client";
 
 export async function GET(request: NextRequest) {
   const supabase = await createClient();
@@ -32,10 +32,9 @@ export async function GET(request: NextRequest) {
 
   if (mashup.status === "done" && mashup.result_storage_path) {
     try {
-      const parsed = JSON.parse(mashup.result_storage_path);
-      return NextResponse.json({ status: "done", ...parsed });
+      return NextResponse.json({ status: "done", ...JSON.parse(mashup.result_storage_path) });
     } catch {
-      // fall through and re-check with LALAL
+      // stored value wasn't the expected payload; fall through and re-check
     }
   }
 
@@ -47,48 +46,73 @@ export async function GET(request: NextRequest) {
   }
 
   if (!mashup.lalal_task_id) {
-    return NextResponse.json({ status: "processing" });
+    return NextResponse.json({ status: "processing", progress: 0 });
   }
 
   const [fileIdA, fileIdB] = String(mashup.lalal_task_id).split(":");
 
-  try {
-    const [resultA, resultB] = await Promise.all([
-      checkSplitStatus(fileIdA),
-      checkSplitStatus(fileIdB),
-    ]);
+  const raw = await checkSplitStatuses([fileIdA, fileIdB]);
 
-    // Always persist the raw response so job state is inspectable even if
-    // the browser tab is closed before it resolves.
+  // Persist the raw response so a job stays diagnosable even with no tab open
+  await admin
+    .from("mashups")
+    .update({ debug_info: { raw, checkedAt: new Date().toISOString() } })
+    .eq("id", mashupId);
+
+  if (raw.status !== "success" || !raw.result) {
+    const message = raw.error || "LALAL check failed";
     await admin
       .from("mashups")
-      .update({ debug_info: { resultA, resultB, checkedAt: new Date().toISOString() } })
+      .update({ status: "failed", result_storage_path: message })
       .eq("id", mashupId);
-
-    if (resultA?.status === "error" || resultB?.status === "error") {
-      const message = resultA?.error || resultB?.error || "LALAL split failed";
-      await admin
-        .from("mashups")
-        .update({ status: "failed", result_storage_path: message })
-        .eq("id", mashupId);
-      return NextResponse.json({ status: "failed", error: message });
-    }
-
-    const instrumentalUrl = resultA?.split?.back_track;
-    const vocalsUrl = resultB?.split?.stem_track;
-
-    if (resultA?.status === "success" && resultB?.status === "success" && instrumentalUrl && vocalsUrl) {
-      const payload = { instrumentalUrl, vocalsUrl };
-      await admin
-        .from("mashups")
-        .update({ status: "done", result_storage_path: JSON.stringify(payload) })
-        .eq("id", mashupId);
-      return NextResponse.json({ status: "done", ...payload });
-    }
-
-    return NextResponse.json({ status: "processing" });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "Status check failed";
-    return NextResponse.json({ status: "processing", note: message });
+    return NextResponse.json({ status: "failed", error: message });
   }
+
+  const a = raw.result[fileIdA];
+  const b = raw.result[fileIdB];
+
+  const failure =
+    a?.task?.state === "error" || a?.task?.state === "cancelled"
+      ? a.task.error || `Track A ${a.task.state}`
+      : b?.task?.state === "error" || b?.task?.state === "cancelled"
+      ? b.task.error || `Track B ${b.task.state}`
+      : a?.status === "error"
+      ? a.error || "Track A errored"
+      : b?.status === "error"
+      ? b.error || "Track B errored"
+      : null;
+
+  if (failure) {
+    await admin
+      .from("mashups")
+      .update({ status: "failed", result_storage_path: failure })
+      .eq("id", mashupId);
+    return NextResponse.json({ status: "failed", error: failure });
+  }
+
+  // Track A contributes the instrumental, track B contributes the vocals
+  const instrumentalUrl = a?.split?.back_track;
+  const vocalsUrl = b?.split?.stem_track;
+
+  if (
+    a?.task?.state === "success" &&
+    b?.task?.state === "success" &&
+    instrumentalUrl &&
+    vocalsUrl
+  ) {
+    const payload = { instrumentalUrl, vocalsUrl };
+    await admin
+      .from("mashups")
+      .update({ status: "done", result_storage_path: JSON.stringify(payload) })
+      .eq("id", mashupId);
+    return NextResponse.json({ status: "done", ...payload });
+  }
+
+  const progressA = a?.task?.progress ?? 0;
+  const progressB = b?.task?.progress ?? 0;
+
+  return NextResponse.json({
+    status: "processing",
+    progress: Math.round((progressA + progressB) / 2),
+  });
 }

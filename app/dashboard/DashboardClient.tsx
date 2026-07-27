@@ -87,6 +87,7 @@ export default function DashboardClient({
         let statusData: {
           status?: string;
           error?: string;
+          progress?: number;
           instrumentalUrl?: string;
           vocalsUrl?: string;
         };
@@ -118,7 +119,8 @@ export default function DashboardClient({
         }
 
         const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        if (!cancelled) setMashupProgress(`Separating vocals and instrumental… (${elapsed}s)`);
+        const pct = statusData.progress ? ` ${statusData.progress}%` : "";
+        if (!cancelled) setMashupProgress(`Separating${pct}… (${elapsed}s)`);
         await new Promise((r) => setTimeout(r, 5000));
       }
 
@@ -371,6 +373,7 @@ export default function DashboardClient({
         let statusData: {
           status?: string;
           error?: string;
+          progress?: number;
           instrumentalUrl?: string;
           vocalsUrl?: string;
         };
@@ -395,7 +398,8 @@ export default function DashboardClient({
         }
 
         const elapsed = Math.round((Date.now() - startedAt) / 1000);
-        setMashupProgress(`Separating vocals and instrumental… (${elapsed}s)`);
+        const pct = statusData.progress ? ` ${statusData.progress}%` : "";
+        setMashupProgress(`Separating${pct}… (${elapsed}s)`);
       }
 
       throw new Error("Timed out waiting for separation to finish");

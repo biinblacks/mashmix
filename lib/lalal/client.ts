@@ -1,9 +1,15 @@
 /**
- * LALAL.ai API client for stem separation (vocal/instrumental splitting).
+ * LALAL.AI API client for stem separation (vocal/instrumental splitting).
  * Docs: https://www.lalal.ai/api/help/
  */
 
 const LALAL_BASE_URL = "https://www.lalal.ai/api";
+
+const apiKey = () => {
+  const key = process.env.LALAL_API_KEY;
+  if (!key) throw new Error("LALAL_API_KEY is not set");
+  return key;
+};
 
 interface LalalUploadResponse {
   status: "success" | "error";
@@ -16,101 +22,98 @@ interface LalalSplitResponse {
   error?: string;
 }
 
-interface LalalFileResult {
-  status: "success" | "progress" | "error";
-  split?: {
-    stem_track?: string; // URL to vocal/stem
-    back_track?: string; // URL to instrumental
-  };
-  error?: string;
+/** Per-file task state. This — not the sibling `status` field — reports progress. */
+export interface LalalTask {
+  state: "success" | "error" | "progress" | "cancelled";
+  error?: string | null;
+  progress?: number | null;
 }
 
-interface LalalCheckResult {
+export interface LalalSplitResult {
+  duration?: number;
+  stem?: string;
+  stem_track?: string;
+  stem_track_size?: number;
+  back_track?: string;
+  back_track_size?: number;
+}
+
+export interface LalalFileResult {
+  /** Whether the *query* for this file succeeded, not whether splitting finished. */
   status: "success" | "error";
+  error?: string;
+  task?: LalalTask | null;
+  split?: LalalSplitResult | null;
+}
+
+export interface LalalCheckResponse {
+  status: "success" | "error";
+  error?: string;
   result?: Record<string, LalalFileResult>;
 }
 
-const apiKey = () => {
-  const key = process.env.LALAL_API_KEY;
-  if (!key) throw new Error("LALAL_API_KEY is not set");
-  return key;
-};
-
 export async function uploadTrack(fileBuffer: Buffer, fileName: string): Promise<string> {
+  // Only ASCII is safe in a header value
+  const headerSafeName = fileName.replace(/[^\x20-\x7E]/g, "_");
+
   const response = await fetch(`${LALAL_BASE_URL}/upload/`, {
     method: "POST",
     headers: {
       Authorization: `license ${apiKey()}`,
-      "Content-Disposition": `attachment; filename="${fileName}"`,
+      "Content-Disposition": `attachment; filename="${headerSafeName}"`,
+      "Content-Type": "application/octet-stream",
     },
-    body: fileBuffer as unknown as BodyInit,
+    body: new Uint8Array(fileBuffer),
   });
 
   const data: LalalUploadResponse = await response.json();
   if (data.status !== "success" || !data.id) {
-    throw new Error(data.error || "LALAL upload failed");
+    throw new Error(data.error || `LALAL upload failed (HTTP ${response.status})`);
   }
   return data.id;
 }
 
-export async function startSplit(fileId: string, stem: "vocals" | "instrumental" = "vocals"): Promise<void> {
-  const params = new URLSearchParams();
-  params.set(
-    "params",
-    JSON.stringify([{ id: fileId, stem, splitter: "phoenix" }])
-  );
+export async function startSplit(
+  fileId: string,
+  stem: "vocals" | "instrumental" = "vocals"
+): Promise<void> {
+  const form = new FormData();
+  form.append("params", JSON.stringify([{ id: fileId, stem, splitter: "phoenix" }]));
 
   const response = await fetch(`${LALAL_BASE_URL}/split/`, {
     method: "POST",
-    headers: {
-      Authorization: `license ${apiKey()}`,
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: params,
+    headers: { Authorization: `license ${apiKey()}` },
+    body: form,
   });
 
   const data: LalalSplitResponse = await response.json();
   if (data.status !== "success") {
-    throw new Error(data.error || "LALAL split request failed");
+    throw new Error(data.error || `LALAL split request failed (HTTP ${response.status})`);
   }
 }
 
-export async function checkSplitStatus(fileId: string): Promise<LalalFileResult | null> {
-  const params = new URLSearchParams();
-  params.set("id", fileId);
+/**
+ * Check one or more split tasks.
+ * The API expects a POST with a form field holding comma-separated ids.
+ * Returns the raw response so callers can persist it for diagnostics.
+ */
+export async function checkSplitStatuses(fileIds: string[]): Promise<LalalCheckResponse> {
+  const form = new FormData();
+  form.append("id", fileIds.join(","));
 
-  const response = await fetch(`${LALAL_BASE_URL}/check/?${params.toString()}`, {
-    method: "GET",
+  const response = await fetch(`${LALAL_BASE_URL}/check/`, {
+    method: "POST",
     headers: { Authorization: `license ${apiKey()}` },
+    body: form,
   });
 
-  const data: LalalCheckResult = await response.json();
-  if (data.status !== "success" || !data.result) return null;
-  return data.result[fileId] ?? null;
-}
-
-/** Poll until split is done or failed, with a max timeout */
-export async function waitForSplit(
-  fileId: string,
-  { timeoutMs = 5 * 60 * 1000, intervalMs = 4000 } = {}
-): Promise<{ stemUrl: string; backTrackUrl: string }> {
-  const start = Date.now();
-
-  while (Date.now() - start < timeoutMs) {
-    const result = await checkSplitStatus(fileId);
-
-    if (result?.status === "success" && result.split) {
-      return {
-        stemUrl: result.split.stem_track ?? "",
-        backTrackUrl: result.split.back_track ?? "",
-      };
-    }
-    if (result?.status === "error") {
-      throw new Error(result.error || "LALAL split failed");
-    }
-
-    await new Promise((r) => setTimeout(r, intervalMs));
+  const text = await response.text();
+  try {
+    return JSON.parse(text) as LalalCheckResponse;
+  } catch {
+    return {
+      status: "error",
+      error: `Unexpected response from LALAL (HTTP ${response.status}): ${text.slice(0, 200)}`,
+    };
   }
-
-  throw new Error("LALAL split timed out");
 }
