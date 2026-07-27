@@ -58,6 +58,13 @@ export async function GET(request: NextRequest) {
       checkSplitStatus(fileIdB),
     ]);
 
+    // Always persist the raw response so job state is inspectable even if
+    // the browser tab is closed before it resolves.
+    await admin
+      .from("mashups")
+      .update({ debug_info: { resultA, resultB, checkedAt: new Date().toISOString() } })
+      .eq("id", mashupId);
+
     if (resultA?.status === "error" || resultB?.status === "error") {
       const message = resultA?.error || resultB?.error || "LALAL split failed";
       await admin

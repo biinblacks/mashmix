@@ -79,7 +79,7 @@ export default function DashboardClient({
       setMashupProgress("Resuming previous mashup job…");
 
       const startedAt = Date.now();
-      const timeoutMs = 10 * 60 * 1000;
+      const timeoutMs = 20 * 60 * 1000;
 
       while (Date.now() - startedAt < timeoutMs && !cancelled) {
         const statusRes = await fetch(`/api/mashup/status?mashupId=${pending.id}`);
@@ -123,7 +123,7 @@ export default function DashboardClient({
       }
 
       if (!cancelled) {
-        setErrorMsg("Mashup: still processing after 10 minutes. Try Generate mashup again to check.");
+        setErrorMsg("Mashup: still processing after 20 minutes. Try Generate mashup again to check.");
         setMashupProgress(null);
         setGeneratingMashup(null);
       }
@@ -361,7 +361,7 @@ export default function DashboardClient({
       // holding a serverless request open past its time limit.
       setMashupProgress("Separating vocals and instrumental…");
       const startedAt = Date.now();
-      const timeoutMs = 10 * 60 * 1000;
+      const timeoutMs = 20 * 60 * 1000;
 
       while (Date.now() - startedAt < timeoutMs) {
         await new Promise((r) => setTimeout(r, 5000));
