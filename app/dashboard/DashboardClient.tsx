@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Upload, Music, Loader2, Sparkles, Crown } from "lucide-react";
 import CamelotWheel from "@/components/CamelotWheel";
 import { createClient } from "@/lib/supabase/client";
@@ -58,6 +58,82 @@ export default function DashboardClient({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const supabase = createClient();
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function resumePendingMashup() {
+      const { data: pending } = await supabase
+        .from("mashups")
+        .select("id, track_a_id, track_b_id")
+        .eq("status", "processing")
+        .not("lalal_task_id", "is", null)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (!pending || cancelled) return;
+
+      const key = `${pending.track_a_id}-${pending.track_b_id}`;
+      setGeneratingMashup(key);
+      setMashupProgress("Resuming previous mashup job…");
+
+      const startedAt = Date.now();
+      const timeoutMs = 10 * 60 * 1000;
+
+      while (Date.now() - startedAt < timeoutMs && !cancelled) {
+        const statusRes = await fetch(`/api/mashup/status?mashupId=${pending.id}`);
+        const statusText = await statusRes.text();
+        let statusData: {
+          status?: string;
+          error?: string;
+          instrumentalUrl?: string;
+          vocalsUrl?: string;
+        };
+        try {
+          statusData = JSON.parse(statusText);
+        } catch {
+          break;
+        }
+
+        if (statusData.status === "done" && statusData.instrumentalUrl && statusData.vocalsUrl) {
+          if (!cancelled) {
+            setMashupResult({
+              instrumentalUrl: statusData.instrumentalUrl,
+              vocalsUrl: statusData.vocalsUrl,
+            });
+            setMashupProgress(null);
+            setGeneratingMashup(null);
+          }
+          return;
+        }
+
+        if (statusData.status === "failed") {
+          if (!cancelled) {
+            setErrorMsg(`Mashup failed: ${statusData.error ?? "Separation failed"}`);
+            setMashupProgress(null);
+            setGeneratingMashup(null);
+          }
+          return;
+        }
+
+        const elapsed = Math.round((Date.now() - startedAt) / 1000);
+        if (!cancelled) setMashupProgress(`Separating vocals and instrumental… (${elapsed}s)`);
+        await new Promise((r) => setTimeout(r, 5000));
+      }
+
+      if (!cancelled) {
+        setErrorMsg("Mashup: still processing after 10 minutes. Try Generate mashup again to check.");
+        setMashupProgress(null);
+        setGeneratingMashup(null);
+      }
+    }
+
+    resumePendingMashup();
+    return () => {
+      cancelled = true;
+    };
+  }, [supabase]);
 
   const handleUpload = useCallback(async (files: FileList) => {
     setUploading(true);
