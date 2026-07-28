@@ -68,6 +68,20 @@ export default function DashboardClient({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const supabase = createClient();
 
+  const [editingBpmId, setEditingBpmId] = useState<string | null>(null);
+
+  const handleBpmEdit = useCallback(
+    async (trackId: string, value: string) => {
+      setEditingBpmId(null);
+      const bpm = parseFloat(value);
+      if (!bpm || bpm < 40 || bpm > 220) return; // outside any real song's tempo
+
+      await supabase.from("tracks").update({ bpm }).eq("id", trackId);
+      setTracks((prev) => prev.map((t) => (t.id === trackId ? { ...t, bpm } : t)));
+    },
+    [supabase]
+  );
+
   /**
    * Pull the separated stems back down and mix them into one finished track.
    * The instrumental sets the tempo; the vocals are nudged to match it.
@@ -581,7 +595,27 @@ export default function DashboardClient({
                     <div className="flex items-center gap-3 text-xs text-[var(--color-paper)]/50">
                       {track.analysis_status === "done" && track.bpm && (
                         <>
-                          <span>{Math.round(track.bpm)} BPM</span>
+                          {editingBpmId === track.id ? (
+                            <input
+                              type="number"
+                              autoFocus
+                              defaultValue={Math.round(track.bpm)}
+                              onBlur={(e) => handleBpmEdit(track.id, e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                                if (e.key === "Escape") setEditingBpmId(null);
+                              }}
+                              className="w-16 rounded bg-white/[0.08] px-1.5 py-0.5 text-right text-[var(--color-paper)] outline-none"
+                            />
+                          ) : (
+                            <button
+                              onClick={() => setEditingBpmId(track.id)}
+                              className="underline decoration-dotted underline-offset-2 hover:text-[var(--color-paper)]"
+                              title="Click to correct if this looks wrong"
+                            >
+                              {Math.round(track.bpm)} BPM
+                            </button>
+                          )}
                           <span className="rounded bg-white/[0.06] px-2 py-0.5 font-display">
                             {track.musical_key}
                           </span>
