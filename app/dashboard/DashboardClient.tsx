@@ -5,6 +5,7 @@ import { Upload, Music, Loader2, Sparkles, Crown } from "lucide-react";
 import CamelotWheel from "@/components/CamelotWheel";
 import { createClient } from "@/lib/supabase/client";
 import { analyzeAudioFile, sanitizeStorageName } from "@/lib/audio/analyze";
+import { buildMashup } from "@/lib/audio/mashup";
 
 interface Track {
   id: string;
@@ -54,10 +55,61 @@ export default function DashboardClient({
   const [matching, setMatching] = useState(false);
   const [generatingMashup, setGeneratingMashup] = useState<string | null>(null);
   const [mashupProgress, setMashupProgress] = useState<string | null>(null);
-  const [mashupResult, setMashupResult] = useState<{ instrumentalUrl: string; vocalsUrl: string } | null>(null);
+  const [mashupResult, setMashupResult] = useState<{
+    url: string;
+    fileName: string;
+    durationSeconds: number;
+    vocalRate: number;
+  } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const supabase = createClient();
+
+  /**
+   * Pull the separated stems back down and mix them into one finished track.
+   * The instrumental sets the tempo; the vocals are nudged to match it.
+   */
+  const finalizeMashup = useCallback(
+    async (
+      instrumentalPath: string,
+      vocalsPath: string,
+      trackAId: string,
+      trackBId: string
+    ) => {
+      setMashupProgress("Mixing the final track…");
+
+      const [instrumentalDl, vocalsDl] = await Promise.all([
+        supabase.storage.from("mashups").download(instrumentalPath),
+        supabase.storage.from("mashups").download(vocalsPath),
+      ]);
+
+      if (!instrumentalDl.data || !vocalsDl.data) {
+        throw new Error("Could not download the separated stems");
+      }
+
+      const trackA = tracks.find((t) => t.id === trackAId);
+      const trackB = tracks.find((t) => t.id === trackBId);
+
+      const result = await buildMashup({
+        instrumental: await instrumentalDl.data.arrayBuffer(),
+        vocals: await vocalsDl.data.arrayBuffer(),
+        instrumentalBpm: trackA?.bpm ?? 0,
+        vocalsBpm: trackB?.bpm ?? 0,
+      });
+
+      const baseA = (trackA?.file_name ?? "trackA").replace(/\.[^.]+$/, "");
+      const baseB = (trackB?.file_name ?? "trackB").replace(/\.[^.]+$/, "");
+
+      setMashupResult({
+        url: URL.createObjectURL(result.blob),
+        fileName: `${baseA} x ${baseB} - MashMix.wav`,
+        durationSeconds: result.durationSeconds,
+        vocalRate: result.vocalRate,
+      });
+      setMashupProgress(null);
+    },
+    [supabase, tracks]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -88,8 +140,8 @@ export default function DashboardClient({
           status?: string;
           error?: string;
           progress?: number;
-          instrumentalUrl?: string;
-          vocalsUrl?: string;
+          instrumentalPath?: string;
+          vocalsPath?: string;
         };
         try {
           statusData = JSON.parse(statusText);
@@ -97,13 +149,19 @@ export default function DashboardClient({
           break;
         }
 
-        if (statusData.status === "done" && statusData.instrumentalUrl && statusData.vocalsUrl) {
+        if (statusData.status === "done" && statusData.instrumentalPath && statusData.vocalsPath) {
           if (!cancelled) {
-            setMashupResult({
-              instrumentalUrl: statusData.instrumentalUrl,
-              vocalsUrl: statusData.vocalsUrl,
-            });
-            setMashupProgress(null);
+            try {
+              await finalizeMashup(
+                statusData.instrumentalPath,
+                statusData.vocalsPath,
+                pending.track_a_id,
+                pending.track_b_id
+              );
+            } catch (err) {
+              setErrorMsg(`Mixing failed: ${err instanceof Error ? err.message : String(err)}`);
+              setMashupProgress(null);
+            }
             setGeneratingMashup(null);
           }
           return;
@@ -135,7 +193,7 @@ export default function DashboardClient({
     return () => {
       cancelled = true;
     };
-  }, [supabase]);
+  }, [supabase, finalizeMashup]);
 
   const handleUpload = useCallback(async (files: FileList) => {
     setUploading(true);
@@ -374,8 +432,8 @@ export default function DashboardClient({
           status?: string;
           error?: string;
           progress?: number;
-          instrumentalUrl?: string;
-          vocalsUrl?: string;
+          instrumentalPath?: string;
+          vocalsPath?: string;
         };
         try {
           statusData = JSON.parse(statusText);
@@ -383,12 +441,13 @@ export default function DashboardClient({
           continue; // transient non-JSON response, keep polling
         }
 
-        if (statusData.status === "done" && statusData.instrumentalUrl && statusData.vocalsUrl) {
-          setMashupResult({
-            instrumentalUrl: statusData.instrumentalUrl,
-            vocalsUrl: statusData.vocalsUrl,
-          });
-          setMashupProgress(null);
+        if (statusData.status === "done" && statusData.instrumentalPath && statusData.vocalsPath) {
+          await finalizeMashup(
+            statusData.instrumentalPath,
+            statusData.vocalsPath,
+            trackAId,
+            trackBId
+          );
           setGeneratingMashup(null);
           return;
         }
@@ -409,7 +468,7 @@ export default function DashboardClient({
       setMashupProgress(null);
       setGeneratingMashup(null);
     }
-  }, []);
+  }, [finalizeMashup]);
 
   const handleUpgrade = useCallback(async () => {
     const res = await fetch("/api/stripe/checkout", { method: "POST" });
@@ -603,17 +662,25 @@ export default function DashboardClient({
 
         {mashupResult && (
           <section className="mt-10 rounded-xl border border-[var(--color-line)] bg-white/[0.02] p-6">
-            <h3 className="font-display text-lg font-semibold text-[var(--color-paper)]">Mashup ready</h3>
-            <div className="mt-4 space-y-3">
-              <div>
-                <p className="text-xs text-[var(--color-paper)]/50 mb-1">Instrumental</p>
-                <audio controls src={mashupResult.instrumentalUrl} className="w-full" />
-              </div>
-              <div>
-                <p className="text-xs text-[var(--color-paper)]/50 mb-1">Vocals</p>
-                <audio controls src={mashupResult.vocalsUrl} className="w-full" />
-              </div>
-            </div>
+            <h3 className="font-display text-lg font-semibold text-[var(--color-paper)]">
+              Mashup ready
+            </h3>
+            <p className="mt-1 text-xs text-[var(--color-paper)]/50">
+              {Math.floor(mashupResult.durationSeconds / 60)}:
+              {String(Math.round(mashupResult.durationSeconds % 60)).padStart(2, "0")}
+              {mashupResult.vocalRate !== 1 &&
+                ` · vocals nudged ${((mashupResult.vocalRate - 1) * 100).toFixed(1)}% to match tempo`}
+            </p>
+
+            <audio controls src={mashupResult.url} className="mt-4 w-full" />
+
+            <a
+              href={mashupResult.url}
+              download={mashupResult.fileName}
+              className="mt-4 inline-block rounded-full bg-gradient-to-r from-[var(--color-magenta)] to-[var(--color-violet)] px-5 py-2.5 font-display text-sm font-semibold text-[var(--color-paper)]"
+            >
+              Download mashup
+            </a>
           </section>
         )}
       </main>

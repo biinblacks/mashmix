@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from "next/server";
 import { createClient, createAdminClient } from "@/lib/supabase/server";
 import { checkSplitStatuses } from "@/lib/lalal/client";
 
+// Downloading two stems from LALAL and storing them can take a while
+export const maxDuration = 300;
+
 export async function GET(request: NextRequest) {
   const supabase = await createClient();
   const {
@@ -100,12 +103,41 @@ export async function GET(request: NextRequest) {
     instrumentalUrl &&
     vocalsUrl
   ) {
-    const payload = { instrumentalUrl, vocalsUrl };
-    await admin
-      .from("mashups")
-      .update({ status: "done", result_storage_path: JSON.stringify(payload) })
-      .eq("id", mashupId);
-    return NextResponse.json({ status: "done", ...payload });
+    // Copy both stems into our own storage. LALAL's URLs expire and aren't
+    // CORS-accessible from the browser, and the mixing step needs to read the
+    // raw audio bytes client-side.
+    const copyToStorage = async (url: string, suffix: string) => {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`Could not download ${suffix} stem (HTTP ${res.status})`);
+      const bytes = Buffer.from(await res.arrayBuffer());
+      const path = `${user.id}/${mashupId}-${suffix}`;
+      const { error: upErr } = await admin.storage
+        .from("mashups")
+        .upload(path, bytes, { contentType: "audio/wav", upsert: true });
+      if (upErr) throw new Error(`Could not store ${suffix} stem: ${upErr.message}`);
+      return path;
+    };
+
+    try {
+      const [instrumentalPath, vocalsPath] = await Promise.all([
+        copyToStorage(instrumentalUrl, "instrumental.wav"),
+        copyToStorage(vocalsUrl, "vocals.wav"),
+      ]);
+
+      const payload = { instrumentalPath, vocalsPath };
+      await admin
+        .from("mashups")
+        .update({ status: "done", result_storage_path: JSON.stringify(payload) })
+        .eq("id", mashupId);
+      return NextResponse.json({ status: "done", ...payload });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Could not save stems";
+      await admin
+        .from("mashups")
+        .update({ status: "failed", result_storage_path: message })
+        .eq("id", mashupId);
+      return NextResponse.json({ status: "failed", error: message });
+    }
   }
 
   const progressA = a?.task?.progress ?? 0;
