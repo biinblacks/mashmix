@@ -1,3 +1,5 @@
+import { computeAlignment } from "./align";
+
 /**
  * Builds a finished mashup: the instrumental of one track with the vocals of
  * another, tempo-matched and mixed down to a single downloadable file.
@@ -15,8 +17,11 @@ export interface MashupBuildOptions {
   vocalsBpm: number;
   /** 0-1, relative loudness of the vocal against the instrumental */
   vocalGain?: number;
-  /** Seconds to delay the vocals so they land on a later section */
-  vocalOffsetSeconds?: number;
+  /**
+   * Place the vocal on a musical phrase boundary after the intro instead of
+   * starting both stems at 0:00. On by default.
+   */
+  autoAlign?: boolean;
 }
 
 export interface MashupResult {
@@ -24,6 +29,10 @@ export interface MashupResult {
   durationSeconds: number;
   /** Playback rate applied to the vocals to line the tempos up */
   vocalRate: number;
+  /** Seconds of instrumental before the vocal enters */
+  vocalStartSeconds: number;
+  /** Bars of instrumental before the vocal enters */
+  barsBeforeVocal: number;
 }
 
 /**
@@ -96,7 +105,7 @@ export async function buildMashup(options: MashupBuildOptions): Promise<MashupRe
     instrumentalBpm,
     vocalsBpm,
     vocalGain = 1.0,
-    vocalOffsetSeconds = 0,
+    autoAlign = true,
   } = options;
 
   const AudioCtx =
@@ -119,10 +128,30 @@ export async function buildMashup(options: MashupBuildOptions): Promise<MashupRe
 
   const sampleRate = instrumentalBuffer.sampleRate;
   const channelCount = Math.max(instrumentalBuffer.numberOfChannels, vocalsBuffer.numberOfChannels);
-  const vocalPlaybackDuration = vocalsBuffer.duration / vocalRate;
+
+  // Work out where the vocal should enter. Analysis runs on a mono, decimated
+  // copy — the beat grid doesn't need full bandwidth and this keeps it quick.
+  let vocalStartSeconds = 0;
+  let vocalTrimSeconds = 0;
+  let barsBeforeVocal = 0;
+
+  if (autoAlign) {
+    const alignment = computeAlignment({
+      instrumental: toAnalysisSignal(instrumentalBuffer),
+      vocals: toAnalysisSignal(vocalsBuffer),
+      sampleRate: ANALYSIS_RATE,
+      instrumentalBpm,
+      vocalsBpm,
+    });
+    vocalStartSeconds = alignment.vocalStartSeconds;
+    vocalTrimSeconds = alignment.vocalTrimSeconds;
+    barsBeforeVocal = alignment.barsBeforeVocal;
+  }
+
+  const vocalPlaybackDuration = (vocalsBuffer.duration - vocalTrimSeconds) / vocalRate;
   const totalDuration = Math.max(
     instrumentalBuffer.duration,
-    vocalOffsetSeconds + vocalPlaybackDuration
+    vocalStartSeconds + vocalPlaybackDuration
   );
 
   const ctx = new OfflineAudioContext(
@@ -147,7 +176,8 @@ export async function buildMashup(options: MashupBuildOptions): Promise<MashupRe
   const vocalsGainNode = ctx.createGain();
   vocalsGainNode.gain.value = vocalGain;
   vocalsSource.connect(vocalsGainNode).connect(ctx.destination);
-  vocalsSource.start(vocalOffsetSeconds);
+  // Third argument skips the stem's lead-in so the phrase starts cleanly
+  vocalsSource.start(vocalStartSeconds, vocalTrimSeconds);
 
   const rendered = await ctx.startRendering();
 
@@ -155,5 +185,29 @@ export async function buildMashup(options: MashupBuildOptions): Promise<MashupRe
     blob: encodeWav(rendered),
     durationSeconds: Math.round(rendered.duration * 10) / 10,
     vocalRate: Math.round(vocalRate * 1000) / 1000,
+    vocalStartSeconds: Math.round(vocalStartSeconds * 10) / 10,
+    barsBeforeVocal,
   };
+}
+
+const ANALYSIS_RATE = 11025;
+
+/** Mono, decimated copy of a buffer for beat-grid analysis. */
+function toAnalysisSignal(buffer: AudioBuffer): Float32Array {
+  const channelCount = buffer.numberOfChannels;
+  const ratio = buffer.sampleRate / ANALYSIS_RATE;
+  const outLength = Math.floor(buffer.length / ratio);
+  const out = new Float32Array(outLength);
+
+  const channels: Float32Array[] = [];
+  for (let ch = 0; ch < channelCount; ch++) channels.push(buffer.getChannelData(ch));
+
+  for (let i = 0; i < outLength; i++) {
+    const src = Math.floor(i * ratio);
+    let sum = 0;
+    for (let ch = 0; ch < channelCount; ch++) sum += channels[ch][src];
+    out[i] = sum / channelCount;
+  }
+
+  return out;
 }

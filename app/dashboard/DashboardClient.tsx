@@ -60,6 +60,8 @@ export default function DashboardClient({
     fileName: string;
     durationSeconds: number;
     vocalRate: number;
+    barsBeforeVocal: number;
+    vocalStartSeconds: number;
   } | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -105,6 +107,8 @@ export default function DashboardClient({
         fileName: `${baseA} x ${baseB} - MashMix.wav`,
         durationSeconds: result.durationSeconds,
         vocalRate: result.vocalRate,
+        barsBeforeVocal: result.barsBeforeVocal,
+        vocalStartSeconds: result.vocalStartSeconds,
       });
       setMashupProgress(null);
     },
@@ -670,6 +674,10 @@ export default function DashboardClient({
               {String(Math.round(mashupResult.durationSeconds % 60)).padStart(2, "0")}
               {mashupResult.vocalRate !== 1 &&
                 ` · vocals nudged ${((mashupResult.vocalRate - 1) * 100).toFixed(1)}% to match tempo`}
+              {mashupResult.barsBeforeVocal > 0 &&
+                ` · vocals enter at ${mashupResult.vocalStartSeconds.toFixed(1)}s (bar ${
+                  mashupResult.barsBeforeVocal + 1
+                }), after the intro`}
             </p>
 
             <audio controls src={mashupResult.url} className="mt-4 w-full" />
