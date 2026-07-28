@@ -22,6 +22,12 @@ export interface MashupBuildOptions {
    * starting both stems at 0:00. On by default.
    */
   autoAlign?: boolean;
+  /**
+   * If section detection already found where the chorus/drop sits in the
+   * vocal track, start the search there instead of from 0:00 — a stem can
+   * have quiet bleed-through earlier that isn't the actual hook.
+   */
+  vocalSectionStartSeconds?: number;
 }
 
 export interface MashupResult {
@@ -106,6 +112,7 @@ export async function buildMashup(options: MashupBuildOptions): Promise<MashupRe
     vocalsBpm,
     vocalGain = 1.0,
     autoAlign = true,
+    vocalSectionStartSeconds,
   } = options;
 
   const AudioCtx =
@@ -136,15 +143,26 @@ export async function buildMashup(options: MashupBuildOptions): Promise<MashupRe
   let barsBeforeVocal = 0;
 
   if (autoAlign) {
+    // If a section hint exists, only search for the phrase entry from there
+    // onward — cheaper, and avoids picking up an early false-positive onset.
+    const searchOffsetSeconds = Math.max(0, vocalSectionStartSeconds ?? 0);
+    const searchOffsetSamples = Math.floor(searchOffsetSeconds * ANALYSIS_RATE);
+
+    const fullVocalSignal = toAnalysisSignal(vocalsBuffer);
+    const vocalSignalForSearch =
+      searchOffsetSamples > 0
+        ? fullVocalSignal.subarray(searchOffsetSamples)
+        : fullVocalSignal;
+
     const alignment = computeAlignment({
       instrumental: toAnalysisSignal(instrumentalBuffer),
-      vocals: toAnalysisSignal(vocalsBuffer),
+      vocals: vocalSignalForSearch,
       sampleRate: ANALYSIS_RATE,
       instrumentalBpm,
       vocalsBpm,
     });
     vocalStartSeconds = alignment.vocalStartSeconds;
-    vocalTrimSeconds = alignment.vocalTrimSeconds;
+    vocalTrimSeconds = searchOffsetSeconds + alignment.vocalTrimSeconds;
     barsBeforeVocal = alignment.barsBeforeVocal;
   }
 

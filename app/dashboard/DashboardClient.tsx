@@ -14,6 +14,7 @@ interface Track {
   bpm: number | null;
   musical_key: string | null;
   analysis_status: string;
+  sections?: { startSeconds: number; endSeconds: number; label: string; energy: number }[] | null;
 }
 
 interface MatchResult {
@@ -92,11 +93,19 @@ export default function DashboardClient({
       const trackA = tracks.find((t) => t.id === trackAId);
       const trackB = tracks.find((t) => t.id === trackBId);
 
+      // If MashMix already found where the chorus/drop sits in the vocal
+      // track, cut the stem there directly — more reliable than re-deriving
+      // "where singing starts" from a stem that may still have bleed-through.
+      const vocalChorus = trackB?.sections?.find(
+        (s) => s.label === "Drop / Chorus" || s.label === "Build-up"
+      );
+
       const result = await buildMashup({
         instrumental: await instrumentalDl.data.arrayBuffer(),
         vocals: await vocalsDl.data.arrayBuffer(),
         instrumentalBpm: trackA?.bpm ?? 0,
         vocalsBpm: trackB?.bpm ?? 0,
+        vocalSectionStartSeconds: vocalChorus?.startSeconds,
       });
 
       const baseA = (trackA?.file_name ?? "trackA").replace(/\.[^.]+$/, "");
@@ -300,6 +309,7 @@ export default function DashboardClient({
               key_confidence: result.keyConfidence,
               energy: result.energy,
               duration_seconds: result.durationSeconds,
+              sections: result.sections,
               analysis_status: "done",
             })
             .eq("id", track.id);
@@ -357,6 +367,7 @@ export default function DashboardClient({
             key_confidence: result.keyConfidence,
             energy: result.energy,
             duration_seconds: result.durationSeconds,
+            sections: result.sections,
             analysis_status: "done",
           })
           .eq("id", track.id);
@@ -561,27 +572,56 @@ export default function DashboardClient({
             <h2 className="font-display text-lg font-semibold text-[var(--color-paper)]">Your tracks</h2>
             <div className="mt-4 divide-y divide-[var(--color-line)] rounded-xl border border-[var(--color-line)]">
               {tracks.map((track) => (
-                <div key={track.id} className="flex items-center justify-between px-4 py-3">
-                  <div className="flex items-center gap-3">
-                    <Music size={16} className="text-[var(--color-paper)]/40" />
-                    <span className="text-sm text-[var(--color-paper)]">{track.file_name}</span>
+                <div key={track.id} className="px-4 py-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <Music size={16} className="text-[var(--color-paper)]/40" />
+                      <span className="text-sm text-[var(--color-paper)]">{track.file_name}</span>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-[var(--color-paper)]/50">
+                      {track.analysis_status === "done" && track.bpm && (
+                        <>
+                          <span>{Math.round(track.bpm)} BPM</span>
+                          <span className="rounded bg-white/[0.06] px-2 py-0.5 font-display">
+                            {track.musical_key}
+                          </span>
+                        </>
+                      )}
+                      {track.analysis_status === "processing" && (
+                        <Loader2 size={14} className="animate-spin" />
+                      )}
+                      {track.analysis_status === "failed" && (
+                        <span className="text-[var(--color-magenta)]">Analysis failed</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-3 text-xs text-[var(--color-paper)]/50">
-                    {track.analysis_status === "done" && track.bpm && (
-                      <>
-                        <span>{Math.round(track.bpm)} BPM</span>
-                        <span className="rounded bg-white/[0.06] px-2 py-0.5 font-display">
-                          {track.musical_key}
-                        </span>
-                      </>
-                    )}
-                    {track.analysis_status === "processing" && (
-                      <Loader2 size={14} className="animate-spin" />
-                    )}
-                    {track.analysis_status === "failed" && (
-                      <span className="text-[var(--color-magenta)]">Analysis failed</span>
-                    )}
-                  </div>
+
+                  {track.sections && track.sections.length > 1 && (
+                    <div className="mt-2 flex h-5 w-full overflow-hidden rounded">
+                      {track.sections.map((section, i) => {
+                        const width =
+                          ((section.endSeconds - section.startSeconds) /
+                            track.sections![track.sections!.length - 1].endSeconds) *
+                          100;
+                        const color =
+                          section.label === "Drop / Chorus"
+                            ? "var(--color-magenta)"
+                            : section.label === "Breakdown"
+                            ? "var(--color-violet)"
+                            : section.label === "Intro" || section.label === "Outro"
+                            ? "#3a3745"
+                            : "var(--color-amber)";
+                        return (
+                          <div
+                            key={i}
+                            title={`${section.label} (${Math.round(section.startSeconds)}s)`}
+                            style={{ width: `${width}%`, backgroundColor: color }}
+                            className="h-full opacity-70 first:rounded-l last:rounded-r"
+                          />
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>

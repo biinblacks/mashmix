@@ -6,6 +6,8 @@
  * for this step.
  */
 
+import { detectSections, type Section } from "./sections";
+
 export interface AudioAnalysis {
   bpm: number;
   camelotKey: string;
@@ -13,9 +15,10 @@ export interface AudioAnalysis {
   keyConfidence: number;
   energy: number;
   durationSeconds: number;
+  sections: Section[];
 }
 
-const PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+export const PITCH_CLASSES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 // Krumhansl-Schmuckler key profiles
 const MAJOR_PROFILE = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88];
@@ -38,7 +41,7 @@ const CAMELOT_TABLE: Record<string, string> = {
 };
 
 /** In-place iterative radix-2 FFT. Arrays must have power-of-two length. */
-function fft(real: Float32Array, imag: Float32Array): void {
+export function fft(real: Float32Array, imag: Float32Array): void {
   const n = real.length;
 
   // Bit-reversal permutation
@@ -298,6 +301,8 @@ export async function analyzeAudioFile(file: File): Promise<AudioAnalysis> {
   const rms = Math.sqrt(sumSquares / samples.length);
   const energy = Math.round(Math.min(1, rms / 0.3) * 1000) / 1000;
 
+  const sections = detectSections(samples, rate);
+
   return {
     bpm,
     camelotKey: key.camelot,
@@ -305,6 +310,7 @@ export async function analyzeAudioFile(file: File): Promise<AudioAnalysis> {
     keyConfidence: Math.round(key.confidence * 1000) / 1000,
     energy,
     durationSeconds: Math.round(durationSeconds * 10) / 10,
+    sections,
   };
 }
 
